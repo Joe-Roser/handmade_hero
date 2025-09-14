@@ -1,20 +1,24 @@
 // Following Handmade Hero, The Molly Rocket series
 //
 
+#include <cstdint>
 #include <iostream>
-#include <windef.h>
 #include <windows.h>
-#include <wingdi.h>
+#include <winuser.h>
 
 #define local_persist static
 #define global_variable static
 #define internal static
 
+
 // Global variables
 global_variable bool running;
+
 global_variable BITMAPINFO bitmapInfo;
 global_variable void *bitmapMemory;
-global_variable HBITMAP bitmapHandle;
+global_variable int bitmapWidth;
+global_variable int bitmapHeight;
+global_variable int bytesPerPixel = 4;
 
 
 // Functions:
@@ -26,48 +30,71 @@ void DebugString(std::string dbg)
   std::cout << dbg;
 }
 
+internal void RenderGradient(int xOffset, int yOffset)
+{
+  int width = bitmapWidth;
+  int height = bitmapHeight;
+
+  int pitch = width * bytesPerPixel;
+  uint8_t *row = (uint8_t *)bitmapMemory;
+  for(int y = 0; y < bitmapHeight; y++)
+  {
+    uint32_t *pixel = (uint32_t *) row;
+    for(int x = 0; x < bitmapWidth; x++)
+    {
+      /* 
+       * BBGGRRxx
+       */
+      uint8_t red = 0;
+      uint8_t blue = x + xOffset;
+      uint8_t green = y + yOffset;
+
+      *pixel++ = (uint32_t)((red << 16) | (green << 8) | blue);
+    }
+    row += pitch;
+  }
+}
+
 // Used to resize the window
 internal void WindowsResizeDibSection(int width, int height)
 {
   //TODO: Bulletproof this
   // Maybe free after
 
-  HDC bitmapDeviceContext;
-
-  if (bitmapHandle) {
-    DeleteObject(bitmapHandle);
-  }
-
-  if(!bitmapDeviceContext)
+  if(bitmapMemory)
   {
-    // TODO: Should these ever be recreated
-    bitmapDeviceContext = CreateCompatibleDC(0);
+    VirtualFree(bitmapMemory, 0, MEM_RELEASE);
   }
+
+  bitmapWidth = width;
+  bitmapHeight = height;
 
   bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
-  bitmapInfo.bmiHeader.biWidth = width;
-  bitmapInfo.bmiHeader.biHeight = height;
+  bitmapInfo.bmiHeader.biWidth = bitmapWidth;
+  bitmapInfo.bmiHeader.biHeight = -bitmapHeight;
   bitmapInfo.bmiHeader.biPlanes = 1;
-  bitmapInfo.bmiHeader.biBitCount = 32;
+  bitmapInfo.bmiHeader.biBitCount = 32; // For aligning memory
   bitmapInfo.bmiHeader.biCompression = BI_RGB;
 
-  bitmapHandle = CreateDIBSection(bitmapDeviceContext,
-                                          &bitmapInfo,
-                                          DIB_RGB_COLORS,
-                                          &bitmapMemory,
-                                          0, 0);
+  int bitmapMemorySize = (bitmapWidth * bitmapHeight) * bytesPerPixel;
+  bitmapMemory = VirtualAlloc(0, bitmapMemorySize, MEM_COMMIT, PAGE_READWRITE);
+
+  RenderGradient(0, 0);
 }
 
 // Used to update the image on the window
-internal void WindowsUpdateWindow(HDC deviceContext, int x, int y, int width, int height)
+internal void WindowsUpdateWindow(HDC deviceContext, RECT *clientRect, int x, int y, int width, int height)
 {
-  StretchDIBits(deviceContext,           // Device context
-                x, y, width, height,     // Old dimensions
-                x, y, width, height,     // New dimensions
-                bitmapMemory,      // 
-                &bitmapInfo, // 
-                DIB_RGB_COLORS,          // Type of colours
-                SRCCOPY);                // What type of bitwise operations do I want to use
+  int windowWidth = clientRect->right - clientRect->left;
+  int windowHeight = clientRect->bottom - clientRect->top;
+
+  StretchDIBits(deviceContext,
+                0, 0, bitmapWidth, bitmapHeight,     // Old dimensions
+                0, 0, windowWidth, windowHeight,     // New dimensions
+                bitmapMemory,                        // The Bitmap
+                &bitmapInfo,                         // The bitmap info
+                DIB_RGB_COLORS,                      // Type of colours
+                SRCCOPY);                            // What type of bitwise operations do I want to use
 }
 
 // Handles the messages from windows
@@ -104,11 +131,14 @@ LRESULT CALLBACK MainWindowCallBack(HWND window,   // Window handle
       PAINTSTRUCT paint;
       HDC deviceContext = BeginPaint(window, &paint);
 
+      RECT clientRect;
+      GetClientRect(window, &clientRect);
+
       int x = paint.rcPaint.left;
       int y = paint.rcPaint.top;
       int height = paint.rcPaint.bottom - paint.rcPaint.top;
       int width = paint.rcPaint.right - paint.rcPaint.left;
-      WindowsUpdateWindow(deviceContext, x, y, width, height);
+      WindowsUpdateWindow(deviceContext, &clientRect, x, y, width, height);
 
       EndPaint(window, &paint);
     }
@@ -144,7 +174,7 @@ int CALLBACK WinMain(_In_ HINSTANCE instance,     // The Window Instance
 
 
   if (RegisterClass(&windowClass)) {
-    HWND windowHandle = CreateWindowEx(0,                                // Window style
+    HWND window = CreateWindowEx(0,                                // Window style
                                        windowClass.lpszClassName,        // Window class name
                                        "Handmade Hero",                  // Window name
                                        WS_OVERLAPPEDWINDOW | WS_VISIBLE, // The style of window created
@@ -156,22 +186,37 @@ int CALLBACK WinMain(_In_ HINSTANCE instance,     // The Window Instance
                                        0,                                // Handle to a menu
                                        instance,                         // handle of the instance
                                        0);                               // Pointer to value to be passed to created window
-    if (windowHandle != NULL)
+    if (window != NULL)
     {
+        int xOffset = 0;
+        int yOffset = 0;
       // Calls message loop from windows
       running = true;
       while(running)
       {
         MSG message;
-        BOOL messageResult = GetMessage(&message, 0, 0, 0);
-        if (messageResult > 0)
+        while(PeekMessage(&message, 0, 0, 0, PM_REMOVE))
         {
+          if(message.message == WM_QUIT)
+          {
+            running = false;
+          }
+
           TranslateMessage(&message);
           DispatchMessage(&message);
         }
-        else
+
+        RenderGradient(xOffset, yOffset);
+
         {
-          break;
+        HDC deviceContext = GetDC(window);
+        RECT clientRect;
+        GetClientRect(window, &clientRect);
+        int windowHeight = clientRect.bottom - clientRect.top;
+        int windowWidth = clientRect.right - clientRect.left;
+
+        WindowsUpdateWindow(deviceContext, &clientRect, 0, 0, windowWidth, windowHeight);
+        xOffset++;
         }
       }
     } else {
