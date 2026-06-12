@@ -3,9 +3,12 @@
 
 #include <cstdint>
 #include <iostream>
+#include <minwindef.h>
 #include <windows.h>
 #include <Xinput.h>
 #include <dsound.h>
+#include <winerror.h>
+#include <wingdi.h>
 #include <winnt.h>
 
 #define local_persist static
@@ -30,6 +33,7 @@ struct Win32WindowDimension {
 // Global variables
 global_variable bool running;
 global_variable Win32OffscreenBuffer globalBackBuffer;
+global_variable LPDIRECTSOUNDBUFFER secondary_buffer;
 
 
 // Functions:
@@ -75,6 +79,7 @@ internal void win32_load_xinput() {
     }
 }
 
+// Setting up the sound buffer
 internal void win32_emit_dsound(HWND window, int32_t samples_per_second, int32_t buffer_size) {
     // Load the lib
     HMODULE dSoundLibrary = LoadLibrary("dsound.dll");
@@ -124,11 +129,10 @@ internal void win32_emit_dsound(HWND window, int32_t samples_per_second, int32_t
                 s_buffer_description.dwBufferBytes = buffer_size;
                 s_buffer_description.lpwfxFormat = &wave_format;
 
-                LPDIRECTSOUNDBUFFER secondary_buffer;
-
                 HRESULT error = direct_sound->CreateSoundBuffer(&s_buffer_description, &secondary_buffer, 0);
                 if(SUCCEEDED(error))
                 {
+                    debug_string("Sound Buffer Created Successfully\n");
                 }
                 else
                 {
@@ -336,10 +340,22 @@ int CALLBACK WinMain(HINSTANCE instance, HINSTANCE prevInstance, LPSTR cmdLine, 
                                      instance,                         // handle of the instance
                                      0);                               // Pointer to value to be passed to created window
         if (window != NULL) {
-                int xOffset = 0;
-                int yOffset = 0;
+            // Graphics test
+            int xOffset = 0;
+            int yOffset = 0;
 
-            win32_emit_dsound(window, 48000, 48000 * sizeof(int16_t) * 2);
+            // Sound system test defs
+            int samples_pr_sec = 48000;
+            int tone_hz = 261;
+            uint32_t running_sample_index = 0;
+            int square_wave_period = samples_pr_sec/tone_hz;
+            int half_square_wave_period = square_wave_period/2;
+            int bytes_per_sample = sizeof(int16_t) * 2;
+            int buffer_size = samples_pr_sec * bytes_per_sample;
+            int tone_volume = 4000;
+
+            win32_emit_dsound(window, samples_pr_sec, buffer_size);
+            secondary_buffer->Play(0, 0, DSBPLAY_LOOPING);
 
             // Calls message loop from windows
             running = true;
@@ -390,6 +406,62 @@ int CALLBACK WinMain(HINSTANCE instance, HINSTANCE prevInstance, LPSTR cmdLine, 
                 }
 
                 render_gradient(&globalBackBuffer, xOffset, yOffset);
+
+                // Direct Sound Output Test
+                DWORD play_cursor;
+                DWORD write_cursor;
+                if(SUCCEEDED(secondary_buffer->GetCurrentPosition(&play_cursor, &write_cursor))) {
+                    DWORD bytes_to_lock = running_sample_index * bytes_per_sample % buffer_size;
+                    DWORD bytes_to_write;
+                    if (bytes_to_lock > play_cursor) {
+                        bytes_to_write = buffer_size - bytes_to_lock;
+                        bytes_to_write += play_cursor;
+                    } else {
+                        bytes_to_write = play_cursor - bytes_to_lock;
+                    }
+
+                    void *region_1;
+                    DWORD region_1_size;
+                    void *region_2;
+                    DWORD region_2_size;
+
+                    HRESULT hr = secondary_buffer->Lock(bytes_to_lock, bytes_to_write, &region_1, &region_1_size, &region_2, &region_2_size, 0);
+
+                    std::cout << hr << '\n';
+
+                    if(SUCCEEDED(hr)) {
+                        // Good place for an assert
+                        int16_t *sample_out = (int16_t *)region_1;
+                        DWORD region_1_sample_count = region_1_size / bytes_per_sample;
+
+                        for (DWORD SampleIndex = 0; SampleIndex < region_1_sample_count; SampleIndex++) {
+                            int16_t sample_val = ((running_sample_index++ / half_square_wave_period) % 2) ? tone_volume : -tone_volume;
+
+                            *sample_out++ = sample_val;
+                            *sample_out++ = sample_val;
+                        }
+                        sample_out = (int16_t *)region_2;
+                        DWORD region_2_sample_count = region_2_size / bytes_per_sample;
+                        for (DWORD SampleIndex = 0; SampleIndex < region_2_sample_count; SampleIndex++) {
+                            int16_t sample_val = ((running_sample_index++ / half_square_wave_period) % 2) ? tone_volume : -tone_volume;
+
+                            *sample_out++ = sample_val;
+                            *sample_out++ = sample_val;
+                        }
+
+                        // Need to unlock
+                        if(SUCCEEDED(secondary_buffer->Unlock(region_1, region_1_size, region_2, region_2_size))) {
+                        } else {
+                        debug_string("Error: Failed to unlock audio buffern");
+                        }
+                    } else {
+                        debug_string("Error: Failed to lock audio buffer\n");
+                    }
+
+
+                } else {
+                    debug_string("Error: Failed to get audio buffer positions\n");
+                }
 
                 {
                     HDC deviceContext = GetDC(window);
